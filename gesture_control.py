@@ -5,15 +5,15 @@ import math
 class GestureController:
     def __init__(self, detection_confidence=0.7, tracking_confidence=0.5):
         # Inisialisasi MediaPipe Hands
-        self.mp_hands = mp.solutions.hands
-        self.hands = self.mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=1, # Kita hanya butuh mendeteksi satu tangan
-            min_detection_confidence=detection_confidence,
-            min_tracking_confidence=tracking_confidence
+        self.mp_hands = mp.solutions.hands # Mengakses modul hands dari MediaPipe
+        self.hands = self.mp_hands.Hands( # Membuat objek Hands detection
+            static_image_mode=False, # False berarti untuk video stream, True untuk gambar statis
+            max_num_hands=1, # Kita cuma mau deteksi satu tangan aja
+            min_detection_confidence=detection_confidence, # Konfidensi deteksi minimum
+            min_tracking_confidence=tracking_confidence # Konfidensi pelacakan minimum
         )
-        self.mp_drawing = mp.solutions.drawing_utils
-        self.cap = None # Objek VideoCapture untuk kamera
+        self.mp_drawing = mp.solutions.drawing_utils # Modul buat gambar landmark tangan
+        self.cap = None # Variabel buat objek VideoCapture (kamera), awalnya None
 
         # Thresholds for gesture detection
         # Untuk pinch gesture (jari telunjuk dan jempol bersentuhan)
@@ -27,17 +27,32 @@ class GestureController:
 
     def start_camera(self, camera_id=0):
         """Memulai stream dari kamera."""
-        self.cap = cv2.VideoCapture(camera_id)
-        if not self.cap.isOpened():
-            print(f"Error: Could not open camera {camera_id}.")
+        # Coba gunakan backend DirectShow (cv2.CAP_DSHOW) sebagai alternatif dari default (MSMF)
+        # Ini seringkali bisa mengatasi masalah "Failed to grab frame" di Windows
+        self.cap = cv2.VideoCapture(camera_id, cv2.CAP_DSHOW) # PERUBAHAN DI SINI!
+        if not self.cap.isOpened(): # Mengecek apakah kamera berhasil dibuka dengan DSHOW
+            print(f"Error: Could not open camera {camera_id} with CAP_DSHOW backend. Trying default backend as a fallback...")
+            # Jika DSHOW gagal, coba backend default lagi (tanpa CAP_DSHOW) sebagai fallback
+            self.cap = cv2.VideoCapture(camera_id)
+            if not self.cap.isOpened():
+                print(f"Error: Could not open camera {camera_id} with default backend either.")
+                return False # Mengembalikan False kalo gagal
+        
+        # Tambahan pengecekan untuk memastikan kamera bisa membaca frame setelah dibuka
+        ret, frame = self.cap.read()
+        if not ret:
+            print("Error: Camera opened, but failed to grab first frame. It might be in use or corrupted.")
+            self.cap.release() # Lepaskan kamera jika gagal membaca frame pertama
             return False
-        return True
+
+        print(f"Camera started successfully using backend: {'CAP_DSHOW' if cv2.CAP_DSHOW else 'Default'} for ID {camera_id}.")
+        return True # Mengembalikan True kalo berhasil
 
     def stop_camera(self):
         """Menghentikan stream kamera."""
-        if self.cap:
-            self.cap.release()
-            self.cap = None
+        if self.cap: # Kalo objek kamera (self.cap) ada
+            self.cap.release() # Melepas sumber daya kamera
+            self.cap = None # Mengatur ulang self.cap jadi None
 
     def process_frame(self, frame):
         """Memproses satu frame untuk deteksi tangan dan gestur."""
@@ -89,7 +104,7 @@ class GestureController:
         distance = math.sqrt(
             (thumb_tip.x - index_tip.x)**2 + 
             (thumb_tip.y - index_tip.y)**2 + 
-            (thumb_tip.z - index_tip.z)**2 
+            (thumb_tip.z - thumb_tip.z)**2 
         )
         
         # Jika jarak kurang dari threshold, anggap sebagai "pinch" (tertutup)

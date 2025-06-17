@@ -8,6 +8,7 @@ class ChessGame:
         """
         self.board = chess.Board()
         self.selected_square = None  # Untuk melacak kotak yang sedang dipilih oleh pemain
+        self.move_history_redo = [] # Menyimpan langkah yang di-undo untuk keperluan redo
 
     def get_board_state(self):
         """
@@ -18,50 +19,96 @@ class ChessGame:
     def get_turn(self):
         """
         Mengembalikan giliran pemain saat ini.
-        True untuk Putih, False untuk Hitam.
+        True untuk Putih (chess.WHITE), False untuk Hitam (chess.BLACK).
         """
         return self.board.turn == chess.WHITE
 
     def select_square(self, square_coords):
         """
-        Memilih atau membatalkan pilihan sebuah kotak di papan.
+        Memilih atau membatalkan pilihan sebuah kotak di papan, atau melakukan langkah.
         square_coords: String notasi catur (e.g., 'e2').
+        Mengembalikan True jika pemilihan/langkah berhasil, False jika tidak.
         """
         try:
             # Mengonversi string notasi catur ke objek square (integer)
             square = chess.Square(chess.parse_square(square_coords)) 
         except ValueError:
             print(f"Invalid square coordinate: {square_coords}")
-            return False # Indikasi bahwa pemilihan gagal
+            return False 
 
-        # Jika belum ada bidak yang dipilih, dan ada bidak di kotak yang dipilih
+        # Jika belum ada bidak yang dipilih (ini adalah pemilihan pertama)
         if self.selected_square is None:
-            if self.board.piece_at(square):
+            piece = self.board.piece_at(square)
+            if piece:
                 # Pastikan bidak yang dipilih adalah milik pemain yang sedang giliran
-                if (self.board.piece_at(square).color == chess.WHITE and self.board.turn == chess.WHITE) or \
-                   (self.board.piece_at(square).color == chess.BLACK and self.board.turn == chess.BLACK):
+                # chess.WHITE adalah True, chess.BLACK adalah False. self.board.turn adalah boolean
+                if (piece.color == self.board.turn): 
                     self.selected_square = square
                     print(f"Selected: {chess.square_name(square)}")
-                    return True # Indikasi pemilihan berhasil
-            return False # Tidak ada bidak milik pemain yang bisa dipilih
+                    return True 
+            return False # Tidak ada bidak milik pemain yang bisa dipilih, atau kotak kosong
 
-        # Jika sudah ada bidak yang dipilih, ini berarti pemain mencoba melakukan langkah
+        # Jika sudah ada bidak yang dipilih (pemain mencoba melakukan langkah)
         else:
             from_square = self.selected_square
             to_square = square
 
-            move = chess.Move(from_square, to_square)
+            # Cek promosi pion (jika pion mencapai baris terakhir)
+            # Asumsi promosi ke Ratu (Queen) untuk penyederhanaan
+            move = None
+            if self.board.piece_at(from_square) and self.board.piece_at(from_square).piece_type == chess.PAWN and \
+               (chess.square_rank(to_square) == 7 or chess.square_rank(to_square) == 0): # Cek baris terakhir untuk promosi
+                move = chess.Move(from_square, to_square, promotion=chess.QUEEN)
+            else:
+                move = chess.Move(from_square, to_square)
 
             if move in self.board.legal_moves:
                 self.board.push(move) # Lakukan langkah
                 self.selected_square = None # Reset pilihan
+                self.move_history_redo = [] # Kosongkan history redo saat langkah baru dilakukan
                 print(f"Moved {chess.square_name(from_square)} to {chess.square_name(to_square)}")
-                return True # Indikasi langkah berhasil
+                return True 
             else:
-                # Jika langkah tidak sah, batalkan pilihan saat ini
+                # Jika langkah tidak sah, atau mencoba klik kotak yang sama lagi
                 print(f"Illegal move: {chess.square_name(from_square)} to {chess.square_name(to_square)}")
                 self.selected_square = None # Batalkan pilihan
-                return False # Indikasi langkah gagal
+                return False 
+
+    def undo_move(self):
+        """
+        Membatalkan langkah terakhir di papan.
+        Mengembalikan True jika berhasil, False jika tidak ada langkah untuk di-undo.
+        """
+        if self.board.move_stack: # Cek apakah ada langkah yang bisa di-undo
+            last_move = self.board.pop() # Batalkan langkah terakhir
+            self.move_history_redo.append(last_move) # Tambahkan ke history redo
+            print(f"Undone move: {last_move.uci()}")
+            self.selected_square = None # Pastikan tidak ada bidak yang dipilih setelah undo
+            return True
+        print("No moves to undo.")
+        return False
+
+    def redo_move(self):
+        """
+        Mengulang langkah yang baru saja di-undo.
+        Mengembalikan True jika berhasil, False jika tidak ada langkah untuk di-redo.
+        """
+        if self.move_history_redo: # Cek apakah ada langkah yang bisa di-redo
+            next_move = self.move_history_redo.pop() # Ambil langkah terakhir dari history redo
+            # Penting: Pastikan langkah yang di-redo valid di posisi papan saat ini.
+            if next_move in self.board.legal_moves: # Pastikan legal di posisi saat ini
+                self.board.push(next_move) # Lakukan langkah
+                print(f"Redone move: {next_move.uci()}")
+                self.selected_square = None
+                return True
+            else:
+                # Jika langkah tidak lagi valid (misal karena state board berubah),
+                # kembalikan move ke history_redo dan cetak pesan
+                self.move_history_redo.append(next_move) # Kembalikan ke history redo
+                print(f"Cannot redo move {next_move.uci()} - not a legal move in current position.")
+                return False
+        print("No moves to redo.")
+        return False
 
     def get_legal_moves(self, square_name=None):
         """
@@ -90,9 +137,11 @@ class ChessGame:
     def reset_game(self):
         """
         Mengatur ulang papan catur ke posisi awal.
+        Juga membersihkan history redo.
         """
         self.board.reset()
         self.selected_square = None
+        self.move_history_redo = [] # Kosongkan history redo saat reset
         print("Game reset.")
 
     def get_game_status(self):

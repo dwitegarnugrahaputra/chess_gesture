@@ -1,205 +1,367 @@
 import pygame
 import cv2
 import chess
+import asyncio 
+import sys 
+import random 
 
-from gesture_control import GestureController
-from chess_game import ChessGame
-from gui_display import ChessGUI, WIDTH, HEIGHT, FPS, SQUARE_SIZE
+# Import modul-modul lokal secara eksplisit
+import gesture_control
+import chess_game
+import gui_display
 
-# --- KONSTANTA BARU ---
-CURSOR_SMOOTHING_FACTOR = 0.6 # Nilai antara 0.0 (tidak smoothing) dan 1.0 (smoothing maksimal)
-                             # Rekomendasi: 0.2 - 0.8. Semakin tinggi, semakin halus tapi lambat responsnya.
+# --- KONSTANTA ---
+CURSOR_SMOOTHING_FACTOR = 0.6 
+
+# Waktu "berpikir" AI yang tetap (default)
+AI_FIXED_THINKING_TIME = 1.0 # Jeda 1.0 detik untuk AI sederhana
 
 class MainGame:
     def __init__(self):
-        self.gesture_controller = GestureController()
-        self.chess_game = ChessGame()
-        self.gui = ChessGUI()
+        self.gesture_controller = gesture_control.GestureController()
+        self.chess_game = chess_game.ChessGame()
+        self.gui = gui_display.ChessGUI() 
 
         self.running = False
         
-        # current_cursor_x, current_cursor_y akan menyimpan posisi kursor yang SUDAH di-smoothing
+        # State game utama: HOMEPAGE, PLAYER_COLOR_SELECTION, PLAYING_VS_COMPUTER, PLAYING_MULTIPLAYER
+        # State IN_GAME_MENU tidak lagi ada sebagai state terpisah
+        self.game_state = "HOMEPAGE" 
+        
         self.current_cursor_x, self.current_cursor_y = None, None 
         self.is_hand_closed = False
         self.prev_is_hand_closed = False
         
-        self.selected_square_gui = None
-        self.possible_moves_gui = []
+        self.selected_square_gui = None 
+        self.possible_moves_gui = [] 
         
-        # Variabel untuk logika klik-lepas: "IDLE", "SELECTED_DRAG"
         self.click_state = "IDLE" 
-        
-        # Variabel baru untuk smoothing kursor. Inisialisasi di tengah layar agar tidak None
-        self.smoothed_cursor_x = WIDTH // 2
-        self.smoothed_cursor_y = HEIGHT // 2
+        self.smoothed_cursor_x = gui_display.WIDTH // 2 
+        self.smoothed_cursor_y = gui_display.HEIGHT // 2 
 
+        self.ai_task = None 
+        
+        self.player_color = chess.WHITE 
+        self.ai_player_color = chess.BLACK 
+        
+        self.selected_game_mode = None 
+        self.selected_player_color_name = None 
+        self.player_is_black_view = False 
 
     def start_game(self):
-        """Memulai semua subsistem dan game loop."""
+        """Memulai semua subsistem (kamera, Pygame) dan game loop utama."""
+        print(f"Python version: {sys.version}")
+        print(f"python-chess version: {chess.__version__}")
+
         if not self.gesture_controller.start_camera():
             print("Failed to start camera. Exiting.")
             return
 
         print("Camera started. Game is running.")
         self.running = True
-        self.game_loop()
+        asyncio.run(self.game_loop_async()) 
 
-    def game_loop(self):
-        """Loop utama permainan."""
+    async def game_loop_async(self):
+        """Loop utama permainan, dijalankan secara asynchronous."""
         while self.running:
-            # --- 1. Event Handling Pygame (untuk keluar) ---
+            # --- 1. Event Handling Pygame (misal: tombol tutup jendela) ---
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.running = False
 
-            # --- 2. Pemrosesan Kamera & Gestur ---
+            # --- 2. Pemrosesan Kamera & Deteksi Gestur (Selalu Aktif) ---
             ret, frame = self.gesture_controller.cap.read()
             if not ret:
                 print("Failed to grab frame from camera.")
                 self.running = False
                 break
             
-            # Flip frame secara horizontal agar lebih intuitif (seperti cermin)
-            frame = cv2.flip(frame, 1)
-
-            # Proses frame dengan MediaPipe
+            frame = cv2.flip(frame, 1) 
             display_frame, hand_landmarks = self.gesture_controller.process_frame(frame)
             
             img_h, img_w, _ = display_frame.shape
             cursor_x_raw, cursor_y_raw = self.gesture_controller.get_hand_position(hand_landmarks, img_w, img_h)
             
-            # --- Terapkan Smoothing Kursor & Penanganan None ---
+            # --- Terapkan Smoothing Kursor & Penanganan None untuk koordinat mentah ---
             if cursor_x_raw is not None and cursor_y_raw is not None:
-                # --- START PERUBAHAN UNTUK ROI ---
-                # BARIS 76: Definisikan ROI dalam persentase dari lebar/tinggi frame kamera
-                # Contoh: hanya gunakan 80% bagian tengah frame (dari 10% hingga 90%)
-                # Sesuaikan nilai-nilai ini (0.1, 0.9) berdasarkan kamera dan kenyamanan Anda.
-                # Jika masalah utama di pojok kiri bawah, coba perkecil roi_x_start dan roi_y_start
-                # Atau perkecil roi_x_end dan roi_y_end jika masalah di pojok kanan atas
-                
-                roi_x_start_perc = 0.05 # Contoh: mulai dari 5% dari kiri (lebih dekat ke tepi)
-                roi_x_end_perc = 0.95   # Contoh: berakhir di 95% dari kiri (lebih dekat ke tepi)
-                roi_y_start_perc = 0.05 # Contoh: mulai dari 5% dari atas
-                roi_y_end_perc = 0.95   # Contoh: berakhir di 95% dari atas
+                roi_x_start_perc = 0.05 
+                roi_x_end_perc = 0.95   
+                roi_y_start_perc = 0.05 
+                roi_y_end_perc = 0.95   
 
                 roi_x_start = int(img_w * roi_x_start_perc)
                 roi_x_end = int(img_w * roi_x_end_perc)
                 roi_y_start = int(img_h * roi_y_start_perc)
                 roi_y_end = int(img_h * roi_y_end_perc)
 
-                # BARIS 88: Pastikan kursor mentah berada di dalam ROI yang kita definisikan
                 if roi_x_start <= cursor_x_raw <= roi_x_end and \
                    roi_y_start <= cursor_y_raw <= roi_y_end:
-                    
-                    # BARIS 91: Normalisasi ulang kursor berdasarkan ROI
-                    # Ini memetakan posisi kursor dari ROI ke rentang 0.0 - 1.0 lagi
                     normalized_x_roi = (cursor_x_raw - roi_x_start) / (roi_x_end - roi_x_start)
                     normalized_y_roi = (cursor_y_raw - roi_y_start) / (roi_y_end - roi_y_start)
 
-                    # BARIS 95: Skala kursor dari ROI normalized ke ukuran jendela Pygame
-                    target_x = int(normalized_x_roi * WIDTH)
-                    target_y = int(normalized_y_roi * HEIGHT)
+                    target_x = int(normalized_x_roi * gui_display.WIDTH) 
+                    target_y = int(normalized_y_roi * gui_display.HEIGHT)
                 else:
-                    # BARIS 99: Jika kursor di luar ROI, pertahankan posisi smoothing terakhir
-                    # Ini mencegah kursor melompat jika tangan keluar dari area yang ditetapkan
                     target_x, target_y = self.smoothed_cursor_x, self.smoothed_cursor_y 
-                # --- END PERUBAHAN UNTUK ROI ---
 
-                # Smoothing menggunakan interpolasi linear (lerp)
-                # Kursor yang di-smoothing bergerak menuju posisi target
                 self.smoothed_cursor_x = int(self.smoothed_cursor_x * CURSOR_SMOOTHING_FACTOR + target_x * (1 - CURSOR_SMOOTHING_FACTOR))
                 self.smoothed_cursor_y = int(self.smoothed_cursor_y * CURSOR_SMOOTHING_FACTOR + target_y * (1 - CURSOR_SMOOTHING_FACTOR))
                 
-                # Update posisi kursor yang akan digunakan oleh GUI dan logika game
                 self.current_cursor_x = self.smoothed_cursor_x
                 self.current_cursor_y = self.smoothed_cursor_y
             else:
-                # Jika tangan tidak terdeteksi, set kursor menjadi None (tidak ditampilkan & tidak memicu aksi)
                 self.current_cursor_x, self.current_cursor_y = None, None 
 
-            # Deteksi status tangan (terbuka/tertutup)
             if hand_landmarks:
                 self.is_hand_closed = self.gesture_controller.is_hand_closed(hand_landmarks)
             else:
                 self.is_hand_closed = False
 
-            # --- 3. Logika Game Berdasarkan Gestur (Klik-Lepas) ---
-            current_hover_square_name = None
-            # Pastikan kursor ada dan valid (bukan None) sebelum mencoba mendapatkan nama kotak
+            # Siapkan posisi kursor dalam format tuple (x, y) untuk fungsi GUI, atau None
+            cursor_pos_for_gui = None
             if self.current_cursor_x is not None and self.current_cursor_y is not None:
-                current_hover_square_name = self.gui.get_square_name_from_pixels(self.current_cursor_x, self.current_cursor_y)
+                cursor_pos_for_gui = (self.current_cursor_x, self.current_cursor_y)
 
-            # --- Deteksi "Klik Down" (Tangan dari Terbuka -> Tertutup) untuk Memilih Bidak ---
-            if self.is_hand_closed and not self.prev_is_hand_closed:
-                # Hanya proses jika kursor valid dan game dalam state IDLE (belum ada bidak dipilih)
-                if self.current_cursor_x is not None and self.current_cursor_y is not None and self.click_state == "IDLE":
-                    if current_hover_square_name:
-                        # Coba pilih kotak di bawah kursor
-                        self.chess_game.select_square(current_hover_square_name)
-                        self.selected_square_gui = self.chess_game.selected_square # Update highlight GUI
-                        
-                        if self.selected_square_gui: # Jika bidak berhasil dipilih
-                            self.possible_moves_gui = self.chess_game.get_legal_moves(chess.square_name(self.selected_square_gui))
-                            self.click_state = "SELECTED_DRAG" # Ubah state ke "sedang drag"
-                        else: # Jika klik di kotak kosong atau bidak lawan tanpa pilihan sebelumnya
-                            self.selected_square_gui = None
-                            self.possible_moves_gui = []
-                            self.click_state = "IDLE" # Tetap di IDLE
-                    else: # Jika klik down di luar papan
-                        self.click_state = "IDLE"
+            # --- Logika Game Berdasarkan State ---
+            if self.game_state == "HOMEPAGE":
+                self._handle_homepage_logic(cursor_pos_for_gui, self.is_hand_closed, self.prev_is_hand_closed)
+            elif self.game_state == "PLAYER_COLOR_SELECTION": 
+                await self._handle_player_color_selection_logic(cursor_pos_for_gui, self.is_hand_closed, self.prev_is_hand_closed)
+            elif self.game_state in ["PLAYING_VS_COMPUTER", "PLAYING_MULTIPLAYER"]: 
+                await self._handle_playing_logic(cursor_pos_for_gui, self.is_hand_closed, self.prev_is_hand_closed) 
+            # Dihapus: elif self.game_state == "IN_GAME_MENU":
+            #    self._handle_in_game_menu_logic(cursor_pos_for_gui, self.is_hand_closed, self.prev_is_hand_closed)
 
-            # --- Deteksi "Klik Up" (Tangan dari Tertutup -> Terbuka) untuk Melakukan Langkah ---
-            elif not self.is_hand_closed and self.prev_is_hand_closed:
-                # Hanya proses jika kursor valid dan game dalam state SELECTED_DRAG (sudah ada bidak dipilih)
-                if self.current_cursor_x is not None and self.current_cursor_y is not None and self.click_state == "SELECTED_DRAG":
-                    if current_hover_square_name:
-                        # Coba lakukan langkah ke kotak di bawah kursor
-                        move_successful = self.chess_game.select_square(current_hover_square_name) # Panggil lagi select_square untuk move
-                        
-                        # Reset highlight dan state setelah mencoba langkah
-                        self.selected_square_gui = self.chess_game.selected_square # Akan jadi None jika move berhasil/dibatalkan
-                        self.possible_moves_gui = [] 
-                    else: # Jika lepas klik di luar papan setelah memilih bidak
-                        self.selected_square_gui = None # Batalkan pilihan
-                        self.possible_moves_gui = []
-                    self.click_state = "IDLE" # Kembali ke state IDLE
-
-            # Simpan status gestur saat ini untuk deteksi transisi di iterasi berikutnya
             self.prev_is_hand_closed = self.is_hand_closed 
 
-            # --- 4. Pembaharuan GUI ---
-            self.gui.screen.fill((0, 0, 0)) # Bersihkan layar
-            
-            # Dapatkan status game terbaru dari logika catur
-            game_status = self.chess_game.get_game_status()
+            # --- Pembaharuan GUI Berdasarkan State ---
+            self.gui.screen.fill((0, 0, 0)) # Selalu bersihkan layar sebelum menggambar (untuk fallback)
 
-            # Gambar papan catur, bidak, highlight, dan status game
-            self.gui.draw_board(self.chess_game.get_board_state(), 
-                                 self.selected_square_gui, 
-                                 self.possible_moves_gui,
-                                 game_status)
+            # Gambar elemen GUI sesuai game_state
+            if self.game_state == "HOMEPAGE":
+                self.gui.draw_homepage(cursor_pos_for_gui) 
+            elif self.game_state == "PLAYER_COLOR_SELECTION": 
+                self.gui.draw_color_selection(cursor_pos_for_gui, self.selected_game_mode, self.selected_player_color_name)
+            elif self.game_state in ["PLAYING_VS_COMPUTER", "PLAYING_MULTIPLAYER"]:
+                game_status = self.chess_game.get_game_status()
+                self.gui.draw_board(self.chess_game.get_board_state(), 
+                                     self.selected_square_gui, 
+                                     self.possible_moves_gui,
+                                     game_status,
+                                     player_is_black_view=self.player_is_black_view) 
+                self.gui.draw_buttons(cursor_pos_for_gui, self.game_state) 
+            # Jika tombol Quit diklik, tampilkan menu overlay, bukan state game yang terpisah
+            # Maka, tidak perlu ada "elif self.game_state == 'IN_GAME_MENU'" lagi di sini.
             
-            # Gambar kursor gestur, hanya jika posisinya valid (bukan None)
+            # Gambar kursor gestur di atas semua elemen GUI lainnya
             if self.current_cursor_x is not None and self.current_cursor_y is not None:
                 self.gui.draw_cursor(self.current_cursor_x, self.current_cursor_y, self.is_hand_closed)
 
-            # Perbarui tampilan Pygame
-            self.gui.update_display()
+            self.gui.update_display() 
 
-           # --- Tampilkan frame kamera di jendela terpisah (untuk debugging) ---
-            # 'display_frame' sudah digambar dengan landmark tangan di gesture_control.py
+            # Tampilkan feed kamera untuk debugging
             cv2.imshow('Camera Feed (Debug)', display_frame) 
-
-            # Tambahkan handler untuk menutup jendela kamera dengan 'q'
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            if cv2.waitKey(1) & 0xFF == ord('q'): 
                 self.running = False
-
+            
+            await asyncio.sleep(0.01) 
 
         # --- 5. Bersih-bersih setelah game loop selesai ---
-        self.gesture_controller.stop_camera()
-        cv2.destroyAllWindows()
-        self.gui.quit()
+        self.gesture_controller.stop_camera() 
+        cv2.destroyAllWindows() 
+        self.gui.quit() 
         print("Game closed.")
+    
+    def _handle_homepage_logic(self, cursor_pos, is_closed, prev_is_hand_closed):
+        """Logika untuk halaman utama (homepage)."""
+        if is_closed and not prev_is_hand_closed: 
+            if cursor_pos is not None: 
+                clicked_button = self.gui.get_button_clicked(cursor_pos, self.game_state)
+                if clicked_button in ["VS COMPUTER", "MULTIPLAYER"]:
+                    print(f"Entering mode selection for: {clicked_button}")
+                    self.selected_game_mode = clicked_button
+                    self.game_state = "PLAYER_COLOR_SELECTION" 
+                    self.selected_player_color_name = None 
+
+    async def _handle_player_color_selection_logic(self, cursor_pos, is_closed, prev_is_hand_closed):
+        """Logika untuk layar pemilihan warna pemain."""
+        if is_closed and not prev_is_hand_closed:
+            if cursor_pos is not None:
+                clicked_button = self.gui.get_button_clicked(cursor_pos, self.game_state)
+
+                if clicked_button == "PLAY AS A WHITE":
+                    self.selected_player_color_name = "PLAY AS A WHITE"
+                    self.player_color = chess.WHITE
+                    self.ai_player_color = chess.BLACK
+                    self.player_is_black_view = False 
+                    print("Player selected White.")
+                    self._start_game_after_color_selection()
+
+                elif clicked_button == "PLAY AS A BLACK":
+                    self.selected_player_color_name = "PLAY AS A BLACK"
+                    self.player_color = chess.BLACK
+                    self.ai_player_color = chess.WHITE
+                    self.player_is_black_view = True 
+                    print("Player selected Black, board will be inverted.")
+                    self._start_game_after_color_selection()
+
+    def _start_game_after_color_selection(self):
+        """Helper function to transition based on selected game mode after color selection."""
+        if self.selected_game_mode == "VS COMPUTER":
+            self.game_state = "PLAYING_VS_COMPUTER" 
+            self.chess_game.reset_game() 
+            print("Starting VS COMPUTER game.")
+            
+            if self.chess_game.get_board_state().turn == self.ai_player_color:
+                print("It's AI's turn initially. Attempting to start AI move task.")
+                if self.ai_task is None or self.ai_task.done(): 
+                    self.ai_task = asyncio.create_task(self._handle_ai_move())
+                else:
+                    print("AI task is already running from init, skipping new task creation.") 
+            else:
+                print("It's player's turn initially. AI will wait for player's move.")
+
+        elif self.selected_game_mode == "MULTIPLAYER":
+            self.game_state = "PLAYING_MULTIPLAYER" 
+            self.chess_game.reset_game()
+            print("Starting Multiplayer game (Placeholder for actual multiplayer logic).")
+
+    async def _handle_playing_logic(self, cursor_pos, is_closed, prev_is_hand_closed):
+        """Logika untuk mode bermain catur (Player vs Computer atau Multiplayer), termasuk menu in-game."""
+        current_hover_square_name = None
+        if cursor_pos is not None: 
+            current_hover_square_name = self.gui.get_square_name_from_pixels(cursor_pos[0], cursor_pos[1], self.player_is_black_view)
+            
+            clicked_button_name = self.gui.get_button_clicked(cursor_pos, self.game_state) 
+            if clicked_button_name and is_closed and not prev_is_hand_closed:
+                if clicked_button_name == "Restart":
+                    self.chess_game.reset_game()
+                    self.selected_square_gui = None
+                    self.possible_moves_gui = []
+                    print("Game restarted.")
+                    
+                    if self.game_state == "PLAYING_VS_COMPUTER" and self.chess_game.get_board_state().turn == self.ai_player_color:
+                        print("It's AI's turn after restart. Attempting to start AI move task.")
+                        if self.ai_task is None or self.ai_task.done(): 
+                            self.ai_task = asyncio.create_task(self._handle_ai_move())
+                        else:
+                            print("AI task is already running from restart, skipping new task creation.") 
+                    else:
+                        print("It's player's turn after restart. AI will wait.")
+
+                elif clicked_button_name == "Undo":
+                    self.chess_game.undo_move() 
+                    self.selected_square_gui = None
+                    self.possible_moves_gui = []
+                    if self.ai_task and not self.ai_task.done(): 
+                        self.ai_task.cancel()
+                        print("AI thinking cancelled due to Undo.")
+                elif clicked_button_name == "Redo":
+                    self.chess_game.redo_move() 
+                    self.selected_square_gui = None
+                    self.possible_moves_gui = []
+                elif clicked_button_name == "Quit": # Tombol Quit langsung berfungsi dari sidebar
+                    self.running = False 
+                    print("Quitting game from in-game sidebar.")
+                return 
+
+        # --- Logika Deteksi Gerakan Bidak (Klik-Lepas) ---
+        if is_closed and not prev_is_hand_closed and cursor_pos is not None: 
+            if self.click_state == "IDLE": 
+                if current_hover_square_name:
+                    piece_at_square = self.chess_game.get_board_state().piece_at(chess.parse_square(current_hover_square_name))
+                    
+                    can_select_piece = False
+                    if self.game_state == "PLAYING_VS_COMPUTER":
+                        if piece_at_square and piece_at_square.color == self.player_color:
+                            can_select_piece = True
+                    elif self.game_state == "PLAYING_MULTIPLAYER":
+                        if piece_at_square and piece_at_square.color == self.chess_game.get_board_state().turn:
+                            can_select_piece = True
+
+                    if can_select_piece:
+                        self.chess_game.select_square(current_hover_square_name)
+                        self.selected_square_gui = self.chess_game.selected_square
+                        if self.selected_square_gui:
+                            self.possible_moves_gui = self.chess_game.get_legal_moves(chess.square_name(self.selected_square_gui))
+                            self.click_state = "SELECTED_DRAG" 
+                    else:
+                        print(f"Cannot select piece at {current_hover_square_name}. It's not your piece or square is empty.")
+                        self.click_state = "IDLE" 
+                else:
+                    self.click_state = "IDLE"
+
+        elif not is_closed and prev_is_hand_closed and cursor_pos is not None: 
+            if self.click_state == "SELECTED_DRAG": 
+                if current_hover_square_name:
+                    move_successful = self.chess_game.select_square(current_hover_square_name)
+                    print(f"Player move successful: {move_successful}") 
+                    self.selected_square_gui = None
+                    self.possible_moves_gui = [] 
+                    
+                    print(f"After player move: Board turn: {'White' if self.chess_game.get_board_state().turn == chess.WHITE else 'Black'}, AI color: {'White' if self.ai_player_color == chess.WHITE else 'Black'}")
+                    print(f"Is game over? {self.chess_game.get_board_state().is_game_over()}")
+
+                    if self.game_state == "PLAYING_VS_COMPUTER" and \
+                       move_successful and \
+                       self.chess_game.get_board_state().turn == self.ai_player_color and \
+                       not self.chess_game.get_board_state().is_game_over():
+                        print("It is AI's turn and game is not over. Attempting to start AI move task.")
+                        if self.ai_task is None or self.ai_task.done(): 
+                            self.ai_task = asyncio.create_task(self._handle_ai_move()) 
+                        else:
+                            print("AI task is already running, skipping new task creation.")
+                    elif move_successful:
+                        print("Player moved successfully, but it's not AI's turn yet or game is over.")
+                    else:
+                        print("Player's move was not successful.")
+                else:
+                    self.selected_square_gui = None
+                    self.possible_moves_gui = []
+                self.click_state = "IDLE"
+        
+    # Dihapus: _handle_in_game_menu_logic
+    # async def _handle_in_game_menu_logic(self, cursor_pos, is_closed, prev_is_hand_closed): 
+    #    ...
+
+    async def _handle_ai_move(self):
+        """Meminta langkah dari AI sederhana dan melaksanakannya."""
+        try:
+            if self.chess_game.get_board_state().turn == self.ai_player_color and \
+               not self.chess_game.get_board_state().is_game_over():
+                
+                print(f"AI ({'White' if self.ai_player_color == chess.WHITE else 'Black'}) is thinking for {AI_FIXED_THINKING_TIME} seconds (simple AI)...") 
+                
+                await asyncio.sleep(AI_FIXED_THINKING_TIME) 
+
+                legal_moves = list(self.chess_game.get_board_state().legal_moves)
+                if not legal_moves:
+                    print("No legal moves for AI. Game might be over or stalled.")
+                    return
+
+                best_move = random.choice(legal_moves)
+                
+                if best_move in self.chess_game.get_board_state().legal_moves:
+                    self.chess_game.select_square(chess.square_name(best_move.from_square))
+                    self.chess_game.select_square(chess.square_name(best_move.to_square))
+                    print(f"AI moved: {best_move.uci()} (random move)")
+                else:
+                    print(f"AI generated an illegal move: {best_move.uci()}. This shouldn't happen with random legal moves.")
+
+                self.selected_square_gui = None 
+                self.possible_moves_gui = [] 
+
+            else:
+                print("AI move not executed: Not AI's turn or game is over.") 
+                print(f"Current turn: {'White' if self.chess_game.get_board_state().turn == chess.WHITE else 'Black'}, AI color: {'White' if self.ai_player_color == chess.WHITE else 'Black'}, Game Over: {self.chess_game.get_board_state().is_game_over()}")
+
+        except asyncio.CancelledError: 
+            print("AI thinking cancelled by user action (e.g., Undo or Pause).")
+        except Exception as e:
+            print(f"An unexpected error occurred during AI move: {e}")
+        finally:
+            self.ai_task = None 
+
 
 if __name__ == "__main__":
     game = MainGame()
